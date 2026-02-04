@@ -255,8 +255,12 @@ def generate_music_sync(job_id: str, request: GenerateMusicRequest):
         
         # 准备输入 - HeartMuLaGenPipeline 接受字符串或文件路径
         # 如果是纯文本，直接传递；如果需要文件，创建临时文件
-        lyrics_content = request.lyrics
+        lyrics_content = request.lyrics.lower()  # 必须小写
+        
+        # tags 必须是小写、逗号分隔、无空格的格式
+        # 例如: "piano,happy,romantic" 而不是 "piano, happy, romantic"
         tags_content = request.tags or "instrumental"
+        tags_content = tags_content.lower().replace(" ", "")  # 小写并移除空格
         
         # HeartMuLaGenPipeline 可以接受字符串或文件路径
         # 为了简单起见，我们创建临时文件
