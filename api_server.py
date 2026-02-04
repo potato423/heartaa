@@ -196,6 +196,28 @@ def get_model():
             # 导入 heartlib（延迟导入，避免启动时就加载大模型）
             import torch
             from heartlib import HeartMuLaGenPipeline
+            from heartlib.heartcodec.modeling_heartcodec import HeartCodec
+            
+            # ============ 关键修复：Monkey patch HeartCodec.detokenize ============
+            # 问题：HeartMuLa 生成的 token 有时会超出 codec 词汇表范围（8192）
+            # 比如 EOS token（8193），这会导致 "index out of bounds" 错误
+            # 解决：在 detokenize 前将 frames 限制在有效范围 [0, 8191]
+            # 参考：https://github.com/fspecii/HeartMuLa-Studio
+            
+            _original_detokenize = HeartCodec.detokenize
+            
+            @torch.inference_mode()
+            def _patched_detokenize(self, frames, *args, **kwargs):
+                # Clamp frame indices to valid codec vocabulary range [0, 8191]
+                # The model may generate special tokens (EOS=8193, etc.) that are out of bounds
+                CODEC_VOCAB_SIZE = 8192  # From codec_config.json codebook_size
+                frames_clamped = frames.clamp(0, CODEC_VOCAB_SIZE - 1)
+                print(f"[HeartMuLa] Frames clamped to [0, {CODEC_VOCAB_SIZE - 1}]")
+                return _original_detokenize(self, frames_clamped, *args, **kwargs)
+            
+            HeartCodec.detokenize = _patched_detokenize
+            print(f"[HeartMuLa] HeartCodec.detokenize 已打补丁，修复 index out of bounds 错误")
+            # ============ 补丁结束 ============
             
             # 设置设备
             device = {
