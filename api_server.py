@@ -178,6 +178,41 @@ _model_instance = None
 _model_lock = asyncio.Lock()
 
 
+def cleanup_gpu_memory(pipeline=None):
+    """
+    清理 GPU 显存，防止 OOM
+    参考 HeartMuLa-Studio 的实现
+    """
+    import torch
+    try:
+        # 1. 如果有 pipeline，先清理 KV cache
+        if pipeline is not None:
+            try:
+                if hasattr(pipeline, 'mula') and hasattr(pipeline.mula, 'reset_caches'):
+                    pipeline.mula.reset_caches()
+                    print("[HeartMuLa] KV cache 已重置")
+            except Exception as e:
+                print(f"[HeartMuLa] 重置 KV cache 时出错: {e}")
+        
+        # 2. Python 垃圾回收
+        gc.collect()
+        
+        # 3. CUDA 显存清理
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            
+            # 打印当前显存状态
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            free = torch.cuda.mem_get_info()[0] / 1024**3
+            print(f"[HeartMuLa] 显存状态: 已分配 {allocated:.2f}GB, 已保留 {reserved:.2f}GB, 可用 {free:.2f}GB")
+        
+        print("[HeartMuLa] GPU 显存清理完成")
+    except Exception as e:
+        print(f"[HeartMuLa] 清理显存时出错: {e}")
+
+
 def get_model():
     """获取或初始化模型实例"""
     global _model_instance, model_status
@@ -257,7 +292,12 @@ def generate_music_sync(job_id: str, request: GenerateMusicRequest):
     """
     同步执行音乐生成（在线程池中运行）
     严格遵循 heartlib 官方 API（HeartMuLaGenPipeline）
+    包含 OOM 防护：生成前后清理显存
     """
+    pipeline = None
+    lyrics_file = None
+    tags_file = None
+    
     try:
         jobs[job_id]["status"] = "processing"
         start_time = datetime.now()
@@ -267,6 +307,10 @@ def generate_music_sync(job_id: str, request: GenerateMusicRequest):
         print(f"[HeartMuLa] Lyrics: {request.lyrics[:100]}...")
         print(f"[HeartMuLa] Tags: {request.tags}")
         print(f"[HeartMuLa] Duration: {request.duration_ms}ms")
+        
+        # ============ 生成前清理显存 ============
+        # 防止显存碎片化导致 OOM
+        cleanup_gpu_memory()
         
         # 确保输出目录存在
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -310,12 +354,6 @@ def generate_music_sync(job_id: str, request: GenerateMusicRequest):
             cfg_scale=request.cfg_scale,
         )
         
-        # 清理临时文件
-        if os.path.exists(lyrics_file):
-            os.remove(lyrics_file)
-        if os.path.exists(tags_file):
-            os.remove(tags_file)
-        
         # 计算生成时间
         end_time = datetime.now()
         generation_time = (end_time - start_time).total_seconds()
@@ -335,6 +373,24 @@ def generate_music_sync(job_id: str, request: GenerateMusicRequest):
         
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error_msg"] = error_msg
+    
+    finally:
+        # ============ 生成后清理（无论成功或失败）============
+        # 清理临时文件
+        if lyrics_file and os.path.exists(lyrics_file):
+            try:
+                os.remove(lyrics_file)
+            except Exception:
+                pass
+        if tags_file and os.path.exists(tags_file):
+            try:
+                os.remove(tags_file)
+            except Exception:
+                pass
+        
+        # 清理 GPU 显存（包括 KV cache）
+        # 这是防止连续生成时 OOM 的关键
+        cleanup_gpu_memory(pipeline)
 
 
 # ============== API 端点 ==============
@@ -489,6 +545,8 @@ async def list_jobs(limit: int = 50):
 @app.on_event("startup")
 async def startup_event():
     """服务启动时的初始化 - 自动下载模型"""
+    import torch
+    
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"[HeartMuLa] API 服务启动")
     print(f"[HeartMuLa] 输出目录: {OUTPUT_DIR}")
@@ -496,6 +554,29 @@ async def startup_event():
     print(f"[HeartMuLa] 模型版本: {MODEL_VERSION}")
     print(f"[HeartMuLa] HF 国内镜像: {HF_MIRROR}")
     print(f"[HeartMuLa] 最大并发: {MAX_CONCURRENT_JOBS}")
+    
+    # ============ GPU 显存优化配置 ============
+    # 设置 PyTorch 内存分配器配置，减少显存碎片化
+    # 参考: https://pytorch.org/docs/stable/notes/cuda.html#environment-variables
+    if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        print(f"[HeartMuLa] 已设置 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
+    
+    # 显示 GPU 信息
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"[HeartMuLa] GPU: {gpu_name} ({gpu_mem:.1f}GB)")
+        
+        # 显存使用建议
+        if gpu_mem < 16:
+            print(f"[HeartMuLa] ⚠️ 显存 < 16GB，建议使用短时长（duration_ms <= 30000）")
+        elif gpu_mem < 24:
+            print(f"[HeartMuLa] 💡 显存 < 24GB，建议使用中等时长（duration_ms <= 60000）")
+        else:
+            print(f"[HeartMuLa] ✓ 显存充足，可生成较长音频")
+    else:
+        print(f"[HeartMuLa] ⚠️ 未检测到 CUDA GPU，将使用 CPU（非常慢）")
     
     # 检查模型是否已存在，不存在则自动下载
     if check_models_exist():
