@@ -254,6 +254,52 @@ def get_model():
             print(f"[HeartMuLa] HeartCodec.detokenize 已打补丁，修复 index out of bounds 错误")
             # ============ 补丁结束 ============
             
+            # ============ 关键修复 2：Sequential Offload ============
+            # 问题：HeartMuLa (3B) 占用 ~23GB 显存，codec 解码时没有足够空间
+            # 解决：在 postprocess (codec 解码) 前，先把 HeartMuLa 移到 CPU
+            # 参考：https://github.com/fspecii/HeartMuLa-Studio
+            
+            from heartlib.pipelines.music_generation import HeartMuLaGenPipeline as _Pipeline
+            _original_postprocess = _Pipeline.postprocess
+            
+            def _patched_postprocess(self, model_outputs, **kwargs):
+                """在 codec 解码前，释放 HeartMuLa 显存"""
+                print(f"[HeartMuLa] Sequential Offload: 释放 HeartMuLa 显存...")
+                
+                # 1. 重置 KV cache
+                if hasattr(self, 'mula') and hasattr(self.mula, 'reset_caches'):
+                    self.mula.reset_caches()
+                    print(f"[HeartMuLa] KV cache 已重置")
+                
+                # 2. 将 HeartMuLa 移到 CPU
+                if hasattr(self, '_mula') and self._mula is not None:
+                    self._mula.to("cpu")
+                    print(f"[HeartMuLa] HeartMuLa 已移至 CPU")
+                
+                # 3. 清理 GPU 显存
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                
+                # 打印显存状态
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                free = torch.cuda.mem_get_info()[0] / 1024**3
+                print(f"[HeartMuLa] 显存释放后: 已分配 {allocated:.2f}GB, 可用 {free:.2f}GB")
+                
+                # 4. 调用原始 postprocess（codec 解码）
+                result = _original_postprocess(self, model_outputs, **kwargs)
+                
+                # 5. 解码完成后，将 HeartMuLa 移回 GPU（为下次生成准备）
+                if hasattr(self, '_mula') and self._mula is not None:
+                    self._mula.to(torch.device(MULA_DEVICE))
+                    print(f"[HeartMuLa] HeartMuLa 已移回 GPU")
+                
+                return result
+            
+            _Pipeline.postprocess = _patched_postprocess
+            print(f"[HeartMuLa] Pipeline.postprocess 已打补丁，实现 Sequential Offload")
+            # ============ 补丁 2 结束 ============
+            
             # 设置设备
             device = {
                 "mula": torch.device(MULA_DEVICE),
