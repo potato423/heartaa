@@ -19,6 +19,7 @@ API 端点：
 """
 
 import os
+import gc
 import uuid
 import asyncio
 import subprocess
@@ -264,6 +265,8 @@ def get_model():
             
             def _patched_postprocess(self, model_outputs, **kwargs):
                 """在 codec 解码前，释放 HeartMuLa 显存"""
+                import gc as _gc  # 在函数内部导入，确保可见
+                
                 print(f"[HeartMuLa] Sequential Offload: 释放 HeartMuLa 显存...")
                 
                 # 1. 重置 KV cache
@@ -277,7 +280,7 @@ def get_model():
                     print(f"[HeartMuLa] HeartMuLa 已移至 CPU")
                 
                 # 3. 清理 GPU 显存
-                gc.collect()
+                _gc.collect()
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
                 
