@@ -289,13 +289,19 @@ def get_model():
                 free = torch.cuda.mem_get_info()[0] / 1024**3
                 print(f"[HeartMuLa] 显存释放后: 已分配 {allocated:.2f}GB, 可用 {free:.2f}GB")
                 
-                # 4. 调用原始 postprocess（codec 解码）
+                # 4. 确保 HeartCodec 在 GPU 上进行解码
+                if hasattr(self, '_codec') and self._codec is not None:
+                    codec_device = next(self._codec.parameters()).device
+                    if codec_device.type == "cpu":
+                        self._codec.to(torch.device(CODEC_DEVICE))
+                        print(f"[HeartMuLa] HeartCodec 已移至 GPU 进行解码")
+                
+                # 5. 调用原始 postprocess（codec 解码）
                 result = _original_postprocess(self, model_outputs, **kwargs)
                 
-                # 5. 解码完成后，将 HeartMuLa 移回 GPU（为下次生成准备）
-                if hasattr(self, '_mula') and self._mula is not None:
-                    self._mula.to(torch.device(MULA_DEVICE))
-                    print(f"[HeartMuLa] HeartMuLa 已移回 GPU")
+                # 5. 解码完成后，不立即移回 GPU（会 OOM）
+                # HeartMuLa 留在 CPU，下次生成时再移回
+                print(f"[HeartMuLa] Codec 解码完成，HeartMuLa 保持在 CPU")
                 
                 return result
             
@@ -367,6 +373,24 @@ def generate_music_sync(job_id: str, request: GenerateMusicRequest):
         
         # 获取模型 pipeline
         pipeline = get_model()
+        
+        # ============ 确保 HeartMuLa 在 GPU 上 ============
+        # 上次生成后 HeartMuLa 可能留在 CPU，需要移回 GPU
+        import torch
+        if hasattr(pipeline, '_mula') and pipeline._mula is not None:
+            mula_device = next(pipeline._mula.parameters()).device
+            target_device = torch.device(MULA_DEVICE)
+            if mula_device != target_device:
+                print(f"[HeartMuLa] HeartMuLa 在 {mula_device}，需要移到 {target_device}")
+                # 先把 HeartCodec 移到 CPU 腾出空间
+                if hasattr(pipeline, '_codec') and pipeline._codec is not None:
+                    pipeline._codec.to("cpu")
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    print(f"[HeartMuLa] HeartCodec 已移至 CPU")
+                # 再把 HeartMuLa 移回 GPU
+                pipeline._mula.to(target_device)
+                print(f"[HeartMuLa] HeartMuLa 已移至 {target_device}")
         
         # 准备输入 - HeartMuLaGenPipeline 接受字符串或文件路径
         # 如果是纯文本，直接传递；如果需要文件，创建临时文件
