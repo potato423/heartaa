@@ -70,7 +70,8 @@ class GenerateMusicRequest(BaseModel):
     prompt: str = Field(..., description="生成提示词/描述")
     lyrics: str = Field(default="[instrumental]", description="歌词内容，格式参考官方文档")
     tags: Optional[str] = Field(default=None, description="风格标签，逗号分隔如: piano,happy,romantic")
-    duration_ms: int = Field(default=60000, ge=1000, le=240000, description="音频时长(毫秒)，最大240000")
+    # 默认 2 分钟（120秒），RTX 4090 24GB 已验证可用
+    duration_ms: int = Field(default=120000, ge=1000, le=240000, description="音频时长(毫秒)，最大240000")
     
     # 高级参数 - 来自官方 run_music_generation.py
     topk: int = Field(default=50, ge=1, le=500, description="Top-k 采样参数")
